@@ -10,8 +10,9 @@ import dateutil.parser
 import sys
 
 
-# These should be passed in via Lambda Environment Variables
+
 try: 
+
     BLACKHOLE_GROUPNAME = os.environ['BLACKHOLE_GROUPNAME']
     ACTION_TOPIC_ARN = os.environ['ACTION_TOPIC_ARN']
     GRACE_PERIOD = int(os.environ['GRACE_PERIOD'])
@@ -20,12 +21,13 @@ try:
     FROM_ADDRESS = os.environ['FROM_ADDRESS']
     EXPLANATION_FOOTER = os.environ['EXPLANATION_FOOTER']
     EXPLANATION_HEADER = os.environ['EXPLANATION_HEADER']
+
 except KeyError as e:
+
     print("Key Error: " + e.message)
     sys.exit(1)
 
 
-# Define a Global String to be the report output sent to ACTION_TOPIC_ARN
 ACTION_SUMMARY = ""
 REPORT_SUMMARY = ""
 
@@ -43,9 +45,13 @@ password_warn_message = "\n\tYour Password will expire in {} days"
 
 email_subject = "Credential Expiration Notice From AWS Account: {}"
 
+
+
+
 def lambda_handler(event, context):
     print("Received event: " + json.dumps(event, sort_keys=True))
     iam_client = boto3.client('iam')
+
 
     try: 
         if event['source'] == "aws.iam" : 
@@ -63,9 +69,8 @@ def process_UsersCron(iam_client):
     max_age = get_max_password_age(iam_client)
     account_name = iam_client.list_account_aliases()['AccountAliases'][0]
     credential_report = get_credential_report(iam_client)
-
-    # Iterate over the credential report, use the report to determine password expiration
-    # Then query for access keys, and use the key creation data to determine key expiration
+    
+    
     for row in credential_report:
         if row['password_enabled'] != "true": continue # Skip IAM Users without passwords, they are service accounts
 
@@ -73,6 +78,7 @@ def process_UsersCron(iam_client):
 
         if  is_user_expired(row['user']) == 0:
             # Process their password
+            ### Dias que expira la clave
             password_expires = days_till_expire(row['password_last_changed'], max_age)
             if password_expires <= 0:
                 REPORT_SUMMARY = REPORT_SUMMARY + "\n{}'s Password expired {} days ago".format(row['user'], password_expires * -1)
@@ -98,7 +104,6 @@ def process_UsersCron(iam_client):
         except ClientError as e:
             continue
 
-
         
         # Email user if necessary
         if message != "": 
@@ -110,24 +115,42 @@ def process_UsersCron(iam_client):
     if REPORT_SUMMARY != "": email_user(FROM_ADDRESS, REPORT_SUMMARY, account_name )
     return
 
-def is_user_expired(username):
-    client = boto3.client('iam')
-    try:
-        response = client.list_groups_for_user(UserName=username)
+    
+def get_max_password_age(iam_client):
+    try: 
+        response = iam_client.get_account_password_policy()
+        return response['PasswordPolicy']['MaxPasswordAge']
     except ClientError as e:
-        return 1
-
-    for group in response['Groups'] :
-        if group['GroupName'] == BLACKHOLE_GROUPNAME:
-            return 1
-    return 0
+        print("Unexpected error in get_max_password_age: %s" + e.message) 
+        
+        
+# Request the credential report, download and parse the CSV.
+def get_credential_report(iam_client):
+    resp1 = iam_client.generate_credential_report()
+    if resp1['State'] == 'COMPLETE' :
+        try: 
+            response = iam_client.get_credential_report()
+            credential_report_csv = response['Content']
+            # print(credential_report_csv)
+            reader = csv.DictReader(credential_report_csv.splitlines())
+            # print(reader.fieldnames)
+            credential_report = []
+            for row in reader:
+                credential_report.append(row)
+            return(credential_report)
+        except ClientError as e:
+            print("Unknown error getting Report: " + e.message)
+    else:
+        sleep(2)
+        return get_credential_report(iam_client)
+    
 
 
 def email_user(email, message, account_name):
     global ACTION_SUMMARY # This is what we send to the admins
     if SEND_EMAIL != "true": return # Abort if we're not supposed to send email
     if message == "": return # Don't send an empty message
-    client = boto3.client('ses')
+    client = boto3.client('ses','eu-central-1')
     body = EXPLANATION_HEADER + "\n" + message + "\n\n" + EXPLANATION_FOOTER
     try: 
         response = client.send_email(
@@ -143,7 +166,21 @@ def email_user(email, message, account_name):
     except ClientError as e:
         print("Failed to send message to {}: {}".format(email, e.message))
         ACTION_SUMMARY = ACTION_SUMMARY + "\nERROR: Message to {} was rejected: {}".format(email, e.message)
+        
 
+
+def is_user_expired(username):
+    client = boto3.client('iam')
+    try:
+        response = client.list_groups_for_user(UserName=username)
+    except ClientError as e:
+        return 1
+
+    for group in response['Groups'] :
+        if group['GroupName'] == BLACKHOLE_GROUPNAME:
+            return 1
+    return 0
+    
 def days_till_expire(last_changed, max_age):
     # Ok - So last_changed can either be a string to parse or already a datetime object.
     # Handle these accordingly
@@ -186,6 +223,7 @@ def get_max_password_age(iam_client):
         return response['PasswordPolicy']['MaxPasswordAge']
     except ClientError as e:
         print("Unexpected error in get_max_password_age: %s" + e.message) 
+
 
 # if called by an IAM Event, do stuff. Not yet implemented
 def process_IAMEvent(event, context, iam_client):
@@ -257,4 +295,4 @@ def send_summary():
         TopicArn=ACTION_TOPIC_ARN,
         Message=message,
         Subject="Expire Users Report for {}".format(datetime.date.today())
-    )
+        )
